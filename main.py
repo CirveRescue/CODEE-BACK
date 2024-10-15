@@ -1,3 +1,4 @@
+import sqlite3
 from fastapi import FastAPI, BackgroundTasks, WebSocket
 import cv2
 import numpy as np
@@ -21,13 +22,33 @@ classes_ocr = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 
 # Almacenar placas detectadas
 detected_plates = []
 
+# Conectar a la base de datos
+def validar_y_registrar_entrada(placa_detectada):
+    conn = sqlite3.connect('C:\xampp\htdocs\codee\database\CODEE.db')  # Cambia por el nombre de tu base de datos
+    cursor = conn.cursor()
+
+    # Verificar si la placa ya existe en la base de datos
+    cursor.execute("SELECT * FROM vehiculos WHERE placa = ?", (placa_detectada,))
+    vehiculo = cursor.fetchone()
+
+    if vehiculo:
+        print(f"La placa {placa_detectada} ya está registrada en la base de datos.")
+        # Aquí puedes actualizar la hora de entrada o realizar alguna acción.
+    else:
+        print(f"La placa {placa_detectada} no está registrada. Registrando nueva entrada...")
+        # Registrar la nueva entrada
+        cursor.execute("INSERT INTO entradas (vehiculo_id, fecha_entrada) VALUES (?, datetime('now'))", (vehiculo_id,))
+        conn.commit()
+
+    conn.close()
+
 @app.websocket("/ws/detected-plates")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     
     while True:
         if detected_plates:
-            # Enviar la placa detectada al clienteJ
+            # Enviar la placa detectada al cliente
             plate_text = detected_plates.pop(0)  # Obtiene y elimina la primera placa
             await websocket.send_text(plate_text)
         
@@ -90,6 +111,8 @@ def process_frame(frame):
                     "coordinates": [x1, y1, x2, y2]
                 })
                 detected_plates.append(plate_text.strip())  # Agregar la placa a la lista
+                # Validar y registrar la entrada en la base de datos
+                validar_y_registrar_entrada(plate_text.strip())
 
     return {"plates_detected": plates_detected}
 
@@ -122,7 +145,7 @@ def capture_from_camera():
 async def start_camera(background_tasks: BackgroundTasks):
     """Inicia la captura de la cámara IP en segundo plano."""
     background_tasks.add_task(capture_from_camera)
-    return {"message": "La captura de la cámara ha comenzadO."}
+    return {"message": "La captura de la cámara ha comenzado."}
 
 # Si deseas iniciar la aplicación desde el script
 if __name__ == "__main__":
