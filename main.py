@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import asyncio
+import paramiko
 
 # Inicializar la aplicación FastAPI
 app = FastAPI()
@@ -23,22 +24,50 @@ classes_ocr = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 
 detected_plates = []
 
 # Conectar a la base de datos
+
+def activar_pluma_via_ssh(host, username, password, command="echo 1 > /path/to/pluma"):
+    try:
+        # Conectar a la Raspberry Pi mediante SSH
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(host, username=username, password=password)
+        
+        # Ejecutar el comando para activar la pluma
+        stdin, stdout, stderr = ssh.exec_command(command)
+        
+        # Verificar si hubo errores
+        error = stderr.read().decode()
+        if error:
+            print("Error activando la pluma:", error)
+        else:
+            print("Pluma activada exitosamente.")
+        
+        # Cerrar la conexión
+        ssh.close()
+    except Exception as e:
+        print(f"Error en la conexión SSH: {e}")
+
+# Llama a esta función en `validar_y_registrar_entrada` si la placa está en la base de datos
 def validar_y_registrar_entrada(placa_detectada):
-    conn = sqlite3.connect('C:\xampp\htdocs\codee\database\CODEE.db')  # Cambia por el nombre de tu base de datos
+    conn = sqlite3.connect('C:\\xampp\\htdocs\\CODEE-FRONT\\database\\CODE.db')
     cursor = conn.cursor()
 
-    # Verificar si la placa ya existe en la base de datos
     cursor.execute("SELECT * FROM vehiculos WHERE placa = ?", (placa_detectada,))
     vehiculo = cursor.fetchone()
 
     if vehiculo:
         print(f"La placa {placa_detectada} ya está registrada en la base de datos.")
-        # Aquí puedes actualizar la hora de entrada o realizar alguna acción.
-    else:
-        print(f"La placa {placa_detectada} no está registrada. Registrando nueva entrada...")
-        # Registrar la nueva entrada
-        cursor.execute("INSERT INTO entradas (vehiculo_id, fecha_entrada) VALUES (?, datetime('now'))", (vehiculo_id,))
-        conn.commit()
+        # Activar pluma en la Raspberry Pi mediante SSH
+        activar_pluma_via_ssh(
+            host="172.16.35.152",  # Reemplaza con la IP de la Raspberry Pi
+            username="Prueba",           # Usuario de la Raspberry Pi
+            password="sistemas",     # Contraseña de la Raspberry Pi
+            command="echo 1 > /sys/class/gpio/gpio17/value"  # Comando para activar la pluma
+        )
+    # else:
+    #     print(f"La placa {placa_detectada} no está registrada. Registrando nueva entrada...")
+    #     cursor.execute("INSERT INTO entradas (vehiculo_id, fecha_entrada) VALUES (?, datetime('now'))", (vehiculo[0],))
+    #     conn.commit()
 
     conn.close()
 
