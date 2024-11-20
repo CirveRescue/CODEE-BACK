@@ -5,6 +5,8 @@ import numpy as np
 from ultralytics import YOLO
 import asyncio
 import paramiko
+import requests
+from requests.auth import HTTPBasicAuth
 
 # Inicializar la aplicación FastAPI
 app = FastAPI()
@@ -23,29 +25,18 @@ classes_ocr = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 
 # Almacenar placas detectadas
 detected_plates = []
 
-# Conectar a la base de datos
 
-def activar_pluma_via_ssh(host, username, password, command="echo 1 > /path/to/pluma"):
+def activar_pluma_via_http(esp32_host, username, password):
     try:
-        # Conectar a la Raspberry Pi mediante SSH
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(host, username=username, password=password)
+        # Enviar solicitud HTTP a la ESP32 con autenticación básica
+        response = requests.get(f"http://{esp32_host}/activar_pluma", auth=HTTPBasicAuth(username, password))
         
-        # Ejecutar el comando para activar la pluma
-        stdin, stdout, stderr = ssh.exec_command(command)
-        
-        # Verificar si hubo errores
-        error = stderr.read().decode()
-        if error:
-            print("Error activando la pluma:", error)
-        else:
+        if response.status_code == 200:
             print("Pluma activada exitosamente.")
-        
-        # Cerrar la conexión
-        ssh.close()
+        else:
+            print(f"Error activando la pluma. Código de estado: {response.status_code}")
     except Exception as e:
-        print(f"Error en la conexión SSH: {e}")
+        print(f"Error en la conexión HTTP: {e}")
 
 # Llama a esta función en `validar_y_registrar_entrada` si la placa está en la base de datos
 def validar_y_registrar_entrada(placa_detectada):
@@ -57,12 +48,11 @@ def validar_y_registrar_entrada(placa_detectada):
 
     if vehiculo:
         print(f"La placa {placa_detectada} ya está registrada en la base de datos.")
-        # Activar pluma en la Raspberry Pi mediante SSH
-        activar_pluma_via_ssh(
-            host="172.16.35.152",  # Reemplaza con la IP de la Raspberry Pi
-            username="Prueba",           # Usuario de la Raspberry Pi
-            password="sistemas",     # Contraseña de la Raspberry Pi
-            command="echo 1 > /sys/class/gpio/gpio17/value"  # Comando para activar la pluma
+        # Activar pluma mediante HTTP en la ESP32 con autenticación
+        activar_pluma_via_http(
+            esp32_host="172.20.10.6",  # Cambia por la IP de la ESP32
+            username="ESP32",           # Nombre de usuario para autenticación
+            password="Tamalito26"         # Contraseña para autenticación
         )
     # else:
     #     print(f"La placa {placa_detectada} no está registrada. Registrando nueva entrada...")
@@ -70,6 +60,7 @@ def validar_y_registrar_entrada(placa_detectada):
     #     conn.commit()
 
     conn.close()
+
 
 @app.websocket("/ws/detected-plates")
 async def websocket_endpoint(websocket: WebSocket):
