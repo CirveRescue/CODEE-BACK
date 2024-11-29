@@ -2,107 +2,148 @@ import sqlite3
 from fastapi import FastAPI, BackgroundTasks, WebSocket
 import cv2
 import numpy as np
+from pydantic import BaseModel
 from ultralytics import YOLO
 import asyncio
-import paramiko
 import requests
 from requests.auth import HTTPBasicAuth
+from datetime import datetime, timedelta
 
 # Inicializar la aplicación FastAPI
 app = FastAPI()
 
 # Cargar los modelos YOLOv8
-model_plate = YOLO("Models/best.pt")  # Ruta al archivo del modelo entrenado para detección de placas
-model_ocr = YOLO("Models/best_OCR.pt")  # Ruta al archivo del modelo entrenado para OCR
+model_plate = YOLO("Models/best.pt")  # Modelo para detección de placas
+model_ocr = YOLO("Models/best_OCR.pt")  # Modelo para OCR
 
-# URL de la cámara IP (ajústala según tu configuración)
-camera_ip_url = "rtsp://888888:888888@192.168.1.10:554/cam/realmonitor?channel=2&subtype=0"
-
-# Clases de caracteres que el modelo OCR puede detectar
-classes_ocr = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 
-               'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
+# Clases del modelo OCR
+classes_ocr = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 
+    'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
+]
 
 # Almacenar placas detectadas
 detected_plates = []
 
-
+# Función para activar la pluma mediante HTTP
 def activar_pluma_via_http(esp32_host, username, password):
     try:
-        # Enviar solicitud HTTP a la ESP32 con autenticación básica
-        response = requests.get(f"http://{esp32_host}/activar_pluma", auth=HTTPBasicAuth(username, password))
-        
+        response = requests.get(
+            f"http://{esp32_host}/activar_pluma", 
+            auth=HTTPBasicAuth(username, password)
+        )
         if response.status_code == 200:
-            print("Pluma activada exitosamente.")
+            print(f"Pluma del ESP32 {esp32_host} activada exitosamente.")
         else:
-            print(f"Error activando la pluma. Código de estado: {response.status_code}")
+            print(f"Error activando la pluma del ESP32 {esp32_host}. Código de estado: {response.status_code}")
     except Exception as e:
-        print(f"Error en la conexión HTTP: {e}")
+        print(f"Error en la conexión HTTP con {esp32_host}: {e}")
 
-# Llama a esta función en `validar_y_registrar_entrada` si la placa está en la base de datos
-def validar_y_registrar_entrada(placa_detectada):
+def validar_y_registrar_entrada(placa_detectada, camara_nombre, camara_ubicacion):
     conn = sqlite3.connect('C:\\xampp\\htdocs\\CODEE-FRONT\\database\\CODE.db')
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM vehiculos WHERE placa = ?", (placa_detectada,))
+    # Diccionario para mapear cámaras con ESP32
+    camaras_esp32 = {
+        # Estructura: "NOMBRE_CAMARA": ("ESP32_HOST", "USERNAME", "PASSWORD")
+        "Cámara 1": ("192.168.100.85", "ESP32", "Tamalito26"),  # Entrada 1
+        "Cámara 2": ("192.168.0.102", "ESP32", "Tamalito26"),  # Entrada 2
+        "Cámara 3": ("192.168.0.103", "ESP32", "Tamalito26"),  # Salida 1
+        "Cámara 4": ("192.168.0.104", "ESP32", "Tamalito26"),  # Salida 2
+    }
+
+    if camara_nombre not in camaras_esp32:
+        print(f"La cámara {camara_nombre} no está configurada en el sistema.")
+        return
+
+    esp32_host, username, password = camaras_esp32[camara_nombre]
+
+    # Recuperar el vehículo de la base de datos
+    cursor.execute("SELECT * FROM vehiculo WHERE placa = ?", (placa_detectada,))
     vehiculo = cursor.fetchone()
 
     if vehiculo:
-        print(f"La placa {placa_detectada} ya está registrada en la base de datos.")
-        # Activar pluma mediante HTTP en la ESP32 con autenticación
-        activar_pluma_via_http(
-            esp32_host="172.20.10.6",  # Cambia por la IP de la ESP32
-            username="ESP32",           # Nombre de usuario para autenticación
-            password="Tamalito26"         # Contraseña para autenticación
-        )
-    # else:
-    #     print(f"La placa {placa_detectada} no está registrada. Registrando nueva entrada...")
-    #     cursor.execute("INSERT INTO entradas (vehiculo_id, fecha_entrada) VALUES (?, datetime('now'))", (vehiculo[0],))
-    #     conn.commit()
+        print(f"La placa {placa_detectada} está registrada en la base de datos.")
+
+        if camara_ubicacion == "Entrada":
+            cursor.execute("""
+                SELECT * FROM entrada WHERE vehiculo_id = ? AND tipo_movimiento = 'Entrada' 
+                AND fecha_movimiento > ?
+            """, (vehiculo[0], datetime.now() - timedelta(minutes=10)))
+
+            entrada_reciente = cursor.fetchone()
+
+            if entrada_reciente:
+                print(f"El vehículo con placa {placa_detectada} ya tiene una entrada registrada recientemente. No se registrará nuevamente.")
+            else:
+                # Activar la pluma
+                activar_pluma_via_http(esp32_host, username, password)
+
+                # Registrar entrada
+                cursor.execute("""
+                    INSERT INTO entrada (usuario_id, vehiculo_id, tipo_movimiento, fecha_movimiento, created_at, updated_at)
+                    VALUES (?, ?, 'Entrada', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """, (vehiculo[1], vehiculo[0]))
+                conn.commit()
+                print(f"Se ha registrado la entrada del vehículo con placa {placa_detectada}.")
+
+        elif camara_ubicacion == "Salida":
+            cursor.execute("SELECT * FROM entrada WHERE vehiculo_id = ? AND tipo_movimiento = 'Entrada'", (vehiculo[0],))
+            entrada = cursor.fetchone()
+
+            if entrada:
+                print(f"El vehículo con placa {placa_detectada} tiene una entrada registrada.")
+                
+                # Activar la pluma
+                activar_pluma_via_http(esp32_host, username, password)
+
+                # Registrar salida
+                cursor.execute("""
+                    INSERT INTO salida (usuario_id, vehiculo_id, tipo_movimiento, fecha_movimiento, created_at, updated_at)
+                    VALUES (?, ?, 'Salida', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """, (entrada[1], vehiculo[0]))
+                conn.commit()
+                
+                # Eliminar la entrada después de registrar la salida
+                cursor.execute("DELETE FROM entrada WHERE id = ?", (entrada[0],))
+                conn.commit()
+
+                print(f"Se ha registrado la salida del vehículo con placa {placa_detectada} y se ha eliminado la entrada.")
+            else:
+                print(f"El vehículo con placa {placa_detectada} no tiene una entrada registrada para salir.")
+    else:
+        print(f"El vehículo con placa {placa_detectada} no se encuentra registrado en la base de datos.")
 
     conn.close()
 
 
-@app.websocket("/ws/detected-plates")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    
-    while True:
-        if detected_plates:
-            # Enviar la placa detectada al cliente
-            plate_text = detected_plates.pop(0)  # Obtiene y elimina la primera placa
-            await websocket.send_text(plate_text)
-        
-        await asyncio.sleep(0.1)  # Esperar un tiempo antes de comprobar nuevamente
 
-def frames_are_similar(frame1, frame2, threshold=30):
-    """Compara dos fotogramas para ver si son similares."""
-    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-    diff = cv2.absdiff(gray1, gray2)
-    mean_diff = np.mean(diff)
-    return mean_diff < threshold
+# Obtener las URLs de las cámaras desde la base de datos
+def obtener_camaras_desde_bd():
+    conn = sqlite3.connect('C:\\xampp\\htdocs\\CODEE-FRONT\\database\\CODE.db')
+    cursor = conn.cursor()
 
-last_frame = None
-threshold = 30  # Umbral para la diferencia entre imágenes
+    # Recuperar ID, URL, ubicación y estado de las cámaras activas
+    cursor.execute("""
+        SELECT Tipo_Dispositivo, IP_Camara, Ubicacion 
+        FROM dispositivo
+        WHERE Estado_Dispositivo = 'Activo'
+    """)
+    camaras = cursor.fetchall()
+    conn.close()
 
-def process_frame(frame):
-    global last_frame
-    
-    if frame is None or frame.size == 0:
-        return {"error": "No se pudo cargar el fotograma."}
-    
-    # Comprobar si este fotograma es similar al anterior
-    if last_frame is not None and frames_are_similar(frame, last_frame, threshold):
-        return {"message": "El fotograma es similar al anterior, no se procesará."}
-    
-    last_frame = frame.copy()
+    return [{"id": camara[0], "url": camara[1], "ubicacion": camara[2]} for camara in camaras]
 
-    # Realizar la detección de placas
+
+
+# Procesar un fotograma
+def process_frame(frame, camara_id, camara_ubicacion):
     results_plate = model_plate(frame)
     plates_detected = []
 
     for result in results_plate:
-        boxes = result.boxes  # Coordenadas de las cajas
+        boxes = result.boxes
         for box in boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             plate_img = frame[y1:y2, x1:x2]
@@ -110,7 +151,6 @@ def process_frame(frame):
             if plate_img.size == 0:
                 continue
 
-            # Realizar la detección de caracteres con el modelo OCR
             results_ocr = model_ocr(plate_img)
             detected_chars = []
 
@@ -128,46 +168,86 @@ def process_frame(frame):
             if plate_text.strip():
                 plates_detected.append({
                     "plate_text": plate_text.strip(),
-                    "coordinates": [x1, y1, x2, y2]
+                    "coordinates": [x1, y1, x2, y2],
+                    "camara_id": camara_id,
+                    "ubicacion": camara_ubicacion
                 })
-                detected_plates.append(plate_text.strip())  # Agregar la placa a la lista
-                # Validar y registrar la entrada en la base de datos
-                validar_y_registrar_entrada(plate_text.strip())
+                detected_plates.append({
+                    "plate_text": plate_text.strip(),
+                    "camara_id": camara_id,
+                    "ubicacion": camara_ubicacion
+                })
+                validar_y_registrar_entrada(plate_text.strip(), camara_id, camara_ubicacion)
 
     return {"plates_detected": plates_detected}
 
-def capture_from_camera():
-    """Captura fotogramas de la cámara IP y procesa la detección en segundo plano."""
-    cap = cv2.VideoCapture(camera_ip_url)
 
-    if not cap.isOpened():
-        print("Error al abrir la cámara IP.")
-        return {"error": "No se pudo abrir la cámara."}
+# Capturar y procesar video desde varias cámaras
+async def capturar_desde_camaras():
+    camaras = obtener_camaras_desde_bd()
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("No se pudo obtener el fotograma de la cámara.")
-            break
+        for camara in camaras:
+            camara_id = camara["id"]
+            camara_url = camara["url"]
+            camara_ubicacion = camara["ubicacion"]
 
-        # Procesar el fotograma de la cámara
-        result = process_frame(frame)
-        print(result)
+            cap = cv2.VideoCapture(camara_url)
+            if not cap.isOpened():
+                print(f"Error al abrir la cámara {camara_id} ({camara_ubicacion})")
+                continue
 
-        # Puedes agregar un pequeño delay o ajustarlo para no capturar fotogramas innecesarios
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            ret, frame = cap.read()
+            if ret:
+                result = process_frame(frame, camara_id, camara_ubicacion)
+                result["camara_id"] = camara_id
+                result["ubicacion"] = camara_ubicacion  # Añadir la ubicación a los resultados
+                print(f"Resultados para cámara {camara_id} ({camara_ubicacion}): {result}")
 
-    cap.release()
-    cv2.destroyAllWindows()
+            cap.release()
 
-@app.get("/start-camera/")
-async def start_camera(background_tasks: BackgroundTasks):
-    """Inicia la captura de la cámara IP en segundo plano."""
-    background_tasks.add_task(capture_from_camera)
-    return {"message": "La captura de la cámara ha comenzado."}
+        await asyncio.sleep(1)  # Esperar un segundo antes de procesar de nuevo
 
-# Si deseas iniciar la aplicación desde el script
+
+connected_clients = set()  # Lista de clientes conectados
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.add(websocket)
+    try:
+        while True:
+            await asyncio.sleep(1)  # Mantener la conexión abierta
+    except:
+        connected_clients.remove(websocket)
+
+def enviar(mensaje):
+    for client in connected_clients:
+        asyncio.create_task(client.send_text(mensaje))
+
+# Iniciar el procesamiento de cámaras
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(capturar_desde_camaras())
+
+
+class PlacaInput(BaseModel):
+    placa: str  # La clave debe coincidir exactamente con lo que se envía
+
+
+@app.post("/api/manual-entry")
+async def manual_entry(input: PlacaInput):
+    """
+    Endpoint para recibir placas manuales desde Laravel
+    """
+    print(f"Placa recibida manualmente: {input.placa}")
+
+    # Procesar la lógica de registro o autorización de la placa
+    validar_y_registrar_entrada(input.placa, "Cámara 2", "Salida")
+
+    return {"message": f"Placa {input.placa} procesada exitosamente."}
+
+# Ejecución del servidor
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
